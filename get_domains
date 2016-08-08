@@ -1,0 +1,80 @@
+#!/usr/bin/perl -w
+use strict;
+use XML::Simple;
+use Data::Dumper::Simple;
+use Text::Iconv;
+use URI::UTF8::Punycode;
+use utf8;
+
+$XML::Simple::PREFERRED_PARSER = 'XML::Parser';
+
+print STDERR "\n\n!!! START GET DOMAINS !!!\n";
+
+#file reading
+my $xml_cp1251;
+while( <> ){
+    $xml_cp1251.=$_;
+}
+
+#convert from win-1251 to utf8
+my $converter = Text::Iconv->new("WINDOWS-1251", "UTF8");
+my $xml_utf8 = $converter->convert( $xml_cp1251 );
+
+
+#substitution xml code page
+$xml_utf8 =~ s/windows-1251/UTF-8/;
+
+my $ref = XMLin( $xml_utf8 , NoAttr => 0, , ForceArray => [ 'content', 'ip', 'url' ] );
+my $content = $ref->{'content'};
+#print Dumper ( $content );
+#exit;
+
+print STDOUT "# ******************************************\n";
+print STDOUT "# ************* DOMAINS RULES **************\n";
+print STDOUT "# ******************************************\n";
+
+my $count   = 0;
+my $cyrcnt  = 0;
+my $sid     = 1000000;
+
+while ( my($key, $value) = each %$content ) {
+    if ( defined $value->{'blockType'} ){
+        my $blockType = $value->{'blockType'};
+        if ( $blockType eq 'domain') {
+
+            print STDERR "---------------- analize record #$key ------------------\n";
+
+            my $domain      = $value->{'domain'};
+            my $includeTime = $value->{'includeTime'};
+            my $number      = $value->{'decision'}->{'number'};
+            my $date        = $value->{'decision'}->{'date'};
+            my $org         = $value->{'decision'}->{'org'};
+
+            utf8::encode( $domain );
+            utf8::encode( $includeTime );
+            utf8::encode( $number );
+            utf8::encode( $date );
+            utf8::encode( $org );
+
+            if ( $domain =~ /[\xD0-\xD3][\x80-\xBF]/ ){
+                $cyrcnt++;
+                my $punycode = puny_enc( $domain );
+                print STDERR "WARN CYRILLIC!!!! '$domain'\t\t'$punycode'\n";
+                $domain = $punycode;
+            }
+            else {
+                print STDERR "domain: '$domain'\n";
+            }
+
+            print STDOUT "#record $key\n";
+            print STDOUT "alert tcp \$HOME_NET any -> any any (msg:\"record $key, RESET\"; content:\"$domain\"; resp:rst_rcv; sid:$sid;)\n";
+            $sid++;
+            print STDOUT "alert tcp \$HOME_NET any -> any any (msg:\"record: $key<br>includeTime: $includeTime<br>number: $number<br>date: $date<br>org: $org<br>\"; content:\"$domain\"; react:msg; sid:$sid;)\n";
+            $sid++;
+
+            $count++;
+        }
+    }
+}
+print STDERR "\nTOTAL: $count Cyrillic: $cyrcnt\n";
+

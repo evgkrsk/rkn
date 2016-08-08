@@ -1,0 +1,77 @@
+#!/usr/bin/perl -w
+use strict;
+use XML::Simple;
+use Data::Dumper::Simple;
+use Text::Iconv;
+use utf8;
+
+$XML::Simple::PREFERRED_PARSER = 'XML::Parser';
+
+print STDERR "\n\n!!! START GET ADDRESSES !!!\n";
+
+#file reading
+my $xml_cp1251;
+while( <> ){
+    $xml_cp1251.=$_;
+}
+
+#convert from win-1251 to utf8
+my $converter = Text::Iconv->new("WINDOWS-1251", "UTF8");
+my $xml_utf8 = $converter->convert( $xml_cp1251 );
+
+
+#substitution xml code page
+$xml_utf8 =~ s/windows-1251/UTF-8/;
+
+my $ref = XMLin( $xml_utf8 , NoAttr => 0, , ForceArray => [ 'content', 'ip', 'url' ] );
+my $content = $ref->{'content'};
+#print Dumper ( $content );
+#exit;
+
+print STDOUT "# ******************************************\n";
+print STDOUT "# ************ ADDRESSES RULES *************\n";
+print STDOUT "# ******************************************\n";
+
+my $sid     = 7000000;
+
+while ( my($key, $value) = each %$content ) {
+    if ( defined $value->{'blockType'} ){
+        my $blockType = $value->{'blockType'};
+        if ( $blockType eq 'ip') {
+
+            print STDERR "---------------- analize record #$key ------------------\n";
+
+            my $includeTime = $value->{'includeTime'};
+            my $number      = $value->{'decision'}->{'number'};
+            my $date        = $value->{'decision'}->{'date'};
+            my $org         = $value->{'decision'}->{'org'};
+            my $IPs         = $value->{'ip'}; 
+
+            utf8::encode( $includeTime );
+            utf8::encode( $number );
+            utf8::encode( $date );
+            utf8::encode( $org );
+
+
+            if ( defined $IPs ){
+                print STDERR Dumper(@$IPs);
+                print STDOUT "#record $key\n";
+                foreach my $ip (@$IPs){
+                    if ( $ip =~ /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/ ){
+                        print STDOUT "reject tcp \$HOME_NET any -> $ip/32 any (msg:\"block tcp: $ip, record $key\"; sid:$sid;)\n";
+                        $sid++;
+                        print STDOUT "reject udp \$HOME_NET any -> $ip/32 any (msg:\"block udp: $ip, record $key\"; sid:$sid;)\n";
+                        $sid++;
+                    }
+                    else {
+                        print STDERR "strange IP: $ip, skip\n";
+                    }
+                }
+            }
+            else {
+                print STDERR "Strange ... IPs not found!\n";
+            }
+        }
+    }
+}
+

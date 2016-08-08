@@ -1,0 +1,183 @@
+#!/usr/bin/perl -w
+use strict;
+use XML::Simple;
+use Data::Dumper::Simple;
+use Text::Iconv;
+use URI::UTF8::Punycode;
+use URI;
+#use URI::Escape;
+use utf8;
+
+$XML::Simple::PREFERRED_PARSER = 'XML::Parser';
+
+print STDERR "\n\n!!! START GET URLS !!!\n\n";
+
+#file reading
+my $xml_cp1251;
+while( <> ){
+    $xml_cp1251.=$_;
+}
+
+#convert from win-1251 to utf8
+my $converter = Text::Iconv->new("WINDOWS-1251", "UTF8");
+my $xml_utf8 = $converter->convert( $xml_cp1251 );
+
+#substitution xml code page
+$xml_utf8 =~ s/windows-1251/UTF-8/;
+
+my $ref = XMLin( $xml_utf8 , NoAttr => 0, , ForceArray => [ 'content', 'ip', 'url' ] );
+my $content = $ref->{'content'};
+#print Dumper ( $content );
+#exit;
+
+sub hexdump($)
+{
+    my $offset = 0;
+
+    foreach my $chunk (unpack "(a16)*", $_[0])
+    {
+        my $hex = unpack "H*", $chunk; # hexadecimal magic
+        $chunk =~ tr/ -~/./c;          # replace unprintables
+        $hex   =~ s/(.{1,8})/$1 /gs;   # insert spaces
+        printf STDERR "0x%08x (%05u)  %-*s %s\n",
+        $offset, $offset, 36, $hex, $chunk;
+        $offset += 16;
+    }
+}
+
+print STDOUT "# ******************************************\n";
+print STDOUT "# *************** URL RULES ****************\n";
+print STDOUT "# ******************************************\n";
+
+my $sid     = 3000000;
+while ( my($key, $value) = each %$content ){
+    if ( defined $value->{'url'} ){
+
+        print STDERR "---------------- analize record #$key ------------------\n";
+
+        my $strange_url = 0;
+        my $domain      = $value->{'domain'};
+        my $includeTime = $value->{'includeTime'};
+        my $number      = $value->{'decision'}->{'number'};
+        my $date        = $value->{'decision'}->{'date'};
+        my $org         = $value->{'decision'}->{'org'};
+        my $urls        = $value->{'url'};
+
+        utf8::encode( $includeTime );
+        utf8::encode( $number );
+        utf8::encode( $date );
+        utf8::encode( $org );
+
+        my ( @URLs, @URIs );
+        foreach my $url (@$urls){
+            if ( $url =~ /^https:/ ){
+                print STDERR "DROP https!!! $url\n";
+            } else {
+                push @URLs, $url;
+            }
+        }
+
+        foreach my $url (@URLs){
+            my $uri = $url;
+            if ( $url =~ /^http:\/\/$domain(\/.*)$/i){
+                $uri =~ s/^http:\/\/$domain(\/.*)$/$1/i;
+            } 
+            elsif ( $url =~ /^http:\/\/$domain$/i ){
+                $uri = "/";
+            }
+            else {
+                print STDERR "Strange URL!\n";
+                print STDERR Dumper( $url );
+                print STDERR Dumper( $domain );
+                $uri = "/";
+                $strange_url = 1;
+            }
+ 
+            utf8::encode( $url );
+            utf8::encode( $uri );
+
+            if ( $url =~ /[\xD0-\xD3][\x80-\xBF]/){
+                print STDERR "CYRILLIC URL: $url\n";
+                print STDERR "URI: $uri\n";
+            }
+            else {
+                print STDERR "URL: $url\n";
+                print STDERR "URI: $uri\n";
+            }
+            push @URIs, $uri;
+        }
+
+        if ( scalar @URIs == 0 ){
+            print STDERR "No URIs for domain $domain\n";
+        }
+        else{
+            utf8::encode( $domain );
+            if ( $domain =~/[\xD0-\xD3][\x80-\xBF]/ ) {
+                my $punycode = puny_enc( $domain );
+                print STDERR "FOUND CYRILLIC DOMAIN: $domain ==> $punycode\n";
+                $domain = $punycode;
+            }
+            for my $i (0 .. $#URIs){
+                if ( $URIs[$i] =~ /[\xD0-\xD3][\x80-\xBF]/ ){
+                    print STDERR "FOUND CYRILLIC URI: $URIs[$i]\n";
+                    $URIs[$i] =~ s/([\xD0-\xD3])([\x80-\xBF])/sprintf '%%%02X%%%02X', ord($1), ord($2)/ge;
+                    print STDERR "ESCAPED: $URIs[$i]\n";
+                }
+                if ( $URIs[$i] =~ /[\x20]/ ){
+                    print STDERR "FOUND WHITES: $URIs[$i]\n";
+                    $URIs[$i] =~ s/(\x20)/sprintf '%%%02X', ord($1)/ge;
+                    print STDERR "ESCAPED: $URIs[$i]\n";
+                }
+                if ( $URIs[$i] =~ /[\xC2-\xC3][\x80-\xBF]/){
+                    print STDERR "FOUND SOME UNICODE: $URIs[$i]\n";
+                    $URIs[$i] =~ s/([\xC2-\xC3])([\x80-\xBF])/sprintf '%%%02X%%%02X', ord($1), ord($2)/ge;
+                    print STDERR "ESCAPED: $URIs[$i]\n";
+                }
+                # anomalies
+                if ( 303706 == $key ){
+                    print STDERR "ANOMALY: record $key, URI: $URIs[$i] has extra (\") at the end\n";
+                    if ( $URIs[$i] =~ /^(.*)"$/ ){
+                        $URIs[$i] =~ s/^(.*)"$/$1/;
+                        print STDERR "ANOMALY: record $key, URI changed: $URIs[$i]\n";
+                    }
+                    else {
+                        print STDERR "ANOMALY: record $key NOT FOUND!\n";
+                    }
+                }
+                if ( 214765 == $key ){
+                    print STDERR "ANOMALY: record $key, URI: $URIs[$i] has extra part\n";
+                    my $_uri = URI->new( $URIs[$i] );
+                    $URIs[$i] = $_uri->path();
+                    print STDERR "ANOMALY: record $key, URI changed: $URIs[$i]\n";
+                }
+                if ( 262108 == $key ){
+                    print STDERR "ANOMALY: record $key, URI: $URIs[$i] has extra part\n";
+                    my $_uri = URI->new( $URIs[$i] );
+                    $URIs[$i] = $_uri->path();
+                    print STDERR "ANOMALY: record $key, URI changed: $URIs[$i]\n";
+                }
+            }
+            print STDOUT "#record $key\n";
+            if ( 0 == $strange_url ){
+                foreach my $uri (@URIs){
+                    my $hexuri  = unpack( "H*", $uri );
+                    $hexuri     =~ s/(.{2})/$1 /gs;
+                    print STDERR "for rule URI: $uri\n";
+                    print STDERR "for rule as hex: $hexuri\n";
+                    print STDOUT "alert tcp \$HOME_NET any -> any \$HTTP_PORTS (msg:\"record $key, RESET\"; content:\"|$hexuri|\"; content:\"$domain\"; resp:rst_rcv; sid:$sid;)\n";
+                    $sid++;
+                    print STDOUT "alert tcp \$HOME_NET any -> any \$HTTP_PORTS (msg:\"record: $key<br>includeTime: $includeTime<br>number: $number<br>date: $date<br>org: $org<br>\"; content:\"|$hexuri|\"; content:\"$domain\"; react:msg; sid:$sid;)\n";
+                    $sid++;
+                }
+            }
+            else {
+                # без URI, блокируем весь домен
+                print STDOUT "alert tcp \$HOME_NET any -> any \$HTTP_PORTS (msg:\"record $key, RESET\"; content:\"$domain\"; resp:rst_rcv; sid:$sid;)\n";
+                $sid++;
+                print STDOUT "alert tcp \$HOME_NET any -> any \$HTTP_PORTS (msg:\"record: $key<br>includeTime: $includeTime<br>number: $number<br>date: $date<br>org: $org<br>\"; content:\"$domain\"; react:msg; sid:$sid;)\n";
+                $sid++;
+            }
+        } 
+    }
+}
+

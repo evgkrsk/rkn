@@ -1,0 +1,125 @@
+#!/usr/bin/perl -w
+use strict;
+use XML::Simple;
+use Data::Dumper::Simple;
+use Text::Iconv;
+use URI::UTF8::Punycode;
+use AnyEvent::DNS;
+use utf8;
+
+$XML::Simple::PREFERRED_PARSER = 'XML::Parser';
+
+print STDERR "\n\n!!! START GET HTTPS !!!\n\n";
+
+#file reading
+my $xml_cp1251;
+while( <> ){
+    $xml_cp1251.=$_;
+}
+
+#convert from win-1251 to utf8
+my $converter = Text::Iconv->new("WINDOWS-1251", "UTF8");
+my $xml_utf8 = $converter->convert( $xml_cp1251 );
+
+#substitution xml code page
+$xml_utf8 =~ s/windows-1251/UTF-8/;
+
+my $ref = XMLin( $xml_utf8 , NoAttr => 0, , ForceArray => [ 'content', 'ip', 'url' ] );
+my $content = $ref->{'content'};
+#print Dumper ( $content );
+#exit;
+#
+print STDOUT "# ******************************************\n";
+print STDOUT "# *************** HTTPS RULES **************\n";
+print STDOUT "# ******************************************\n";
+
+my @domains;
+my $sid     = 5000000;
+while ( my($key, $value) = each %$content ){
+    if ( defined $value->{'url'} ){
+
+        print STDERR "---------------- analize record #$key ------------------\n";
+
+        my $https       = 0;                    #признак наличия https
+        my $urls        = $value->{'url'};
+
+        foreach my $url (@$urls){
+            if ( $url =~ /^https:/ ){
+                print STDERR "FOUND HTTPS: $url\n";
+                $https = 1;
+            }
+        }
+
+        if ( 1 == $https ){
+
+            my $domain      = $value->{'domain'};
+            my $includeTime = $value->{'includeTime'};
+            my $number      = $value->{'decision'}->{'number'};
+            my $date        = $value->{'decision'}->{'date'};
+            my $org         = $value->{'decision'}->{'org'};
+
+            utf8::encode( $domain );
+            utf8::encode( $includeTime );
+            utf8::encode( $number );
+            utf8::encode( $date );
+            utf8::encode( $org );
+
+            if ( $domain =~ /[\xD0-\xD3][\x80-\xBF]/ ){
+                my $punycode = puny_enc( $domain );
+                print STDERR "WARN CYRILLIC!!!! '$domain'\t\t'$punycode'\n";
+                $domain = $punycode;
+            }
+            push @domains, $domain;
+            print STDOUT "#record $key\n";
+            #alert tcp $HOME_NET any -> any $HTTP_PORTS (msg:"RESET!"; content:"GET / "; content:"Host: www.aromagood.com"; resp:rst_rcv; sid:1000005;)
+            #alert tcp $HOME_NET any -> any $HTTP_PORTS (msg:"REACT!"; content:"GET / "; content:"Host: www.aromagood.com"; react:msg; sid:1000006;)
+            
+            print STDOUT "alert tcp \$HOME_NET any -> any 443 (msg:\"record $key, RESET\"; content:\"$domain\"; resp:rst_rcv; sid:$sid;)\n";
+            $sid++;
+            print STDOUT "alert tcp \$HOME_NET any -> any 443 (msg:\"record: $key<br>includeTime: $includeTime<br>number: $number<br>date: $date<br>org: $org<br>\"; content:\"$domain\"; react:msg; sid:$sid;)\n";
+            $sid++;
+        }
+        else {
+            print STDERR "HTTPS not found, skip\n";
+        }
+    }
+}
+
+                              
+if ( 0 != scalar @domains ){
+    my @ip;
+    my $cv = AnyEvent->condvar;
+    foreach my $host (@domains) {
+        $cv->begin; # Mark host as started
+
+        AnyEvent::DNS::resolver->resolve($host, "a", sub {
+                print STDERR "resolve $host:";
+                for my $record (@_) {
+                    # Sample:
+                    # 'www.google.com', 'a', 'in', 3600, '127.0.0.1'
+                    push @ip, $record->[4];
+                    print STDERR " ",$record->[4];
+                }
+                print STDERR "\n";
+                $cv->end; # Mark host as finished
+            });
+    }
+    $cv->recv;
+    #print STDERR Dumper( @ip );
+    print STDERR "Got for https domains IPs: ",scalar @ip,"\n";
+
+    my %hash= map { $_, 1 } @ip;
+    @ip     = keys %hash;
+
+    print STDERR "Got for https doamins unique IPs: ",scalar @ip,"\n";
+
+    print STDOUT "# ******************************************\n";
+    print STDOUT "# ************ BLOCK HTTPS HOSTS ***********\n";
+    print STDOUT "# ******************************************\n";
+
+    foreach my $addr (@ip){ 
+        print STDOUT "alert tcp \$HOME_NET any -> $addr/32 443 (msg:\"RESET HTTPS: $addr\"; resp:rst_all; sid:$sid;)\n";
+        $sid++;
+    }
+}
+
